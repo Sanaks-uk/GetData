@@ -2,20 +2,10 @@ import streamlit as st
 import pandas as pd
 import requests
 from requests.auth import HTTPBasicAuth
-import time
-import math
-import json
 import base64
-from datetime import datetime
-
-# Try to import lxml, fall back to xml.etree if not available
-try:
-    from lxml import etree
-    XML_PARSER = "lxml"
-except ImportError:
-    import xml.etree.ElementTree as etree
-    XML_PARSER = "builtin"
-    st.warning("⚠️ lxml not found, using built-in XML parser. Consider adding lxml to requirements.txt for better performance.")
+import time
+from datetime import datetime, timedelta
+import json
 
 # ===== 1️⃣ Page config and CSS styling =====
 st.set_page_config(page_title="EPO Patent Data", layout="centered")
@@ -48,241 +38,299 @@ st.markdown(
 )
 
 st.title("📄 EPO Patent & Register Data")
-st.markdown("Fill in your credentials and parameters below:")
+st.markdown("Extract patent data for date ranges - Built for large-scale data extraction")
 
-# ===== 2️⃣ Working Authentication Methods =====
-def get_access_token_method1(client_id, client_secret):
-    """EPO OAuth2 - Method 1 (Manual base64)"""
-    token_url = "https://ops.epo.org/3.2/auth/accesstoken"
+# ===== 2️⃣ Simple Authentication =====
+def get_token(client_id, client_secret):
+    """Get EPO access token - simplified approach"""
+    url = "https://ops.epo.org/3.2/auth/accesstoken"
     
-    # Manual base64 encoding
-    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode('utf-8')).decode('utf-8')
-    
-    headers = {
-        'Authorization': f'Basic {credentials}',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'EPO-Patent-App/1.0'
-    }
-    
-    data = 'grant_type=client_credentials'
-    
-    try:
-        response = requests.post(token_url, headers=headers, data=data, timeout=30)
-        if response.status_code == 200:
-            return response.json().get('access_token')
-    except Exception:
-        pass
-    return None
-
-def get_access_token_method2(client_id, client_secret):
-    """EPO OAuth2 - Method 2 (HTTPBasicAuth)"""
-    token_url = "https://ops.epo.org/3.2/auth/accesstoken"
-    
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'EPO-Patent-App/1.0'
-    }
-    
-    data = {'grant_type': 'client_credentials'}
-    
+    # Use HTTPBasicAuth - the simplest approach
     try:
         response = requests.post(
-            token_url, 
-            headers=headers, 
-            data=data,
+            url,
             auth=HTTPBasicAuth(client_id, client_secret),
-            timeout=30
+            data={'grant_type': 'client_credentials'},
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=10
         )
+        
         if response.status_code == 200:
             return response.json().get('access_token')
-    except Exception:
-        pass
-    return None
-
-def get_access_token(client_id, client_secret):
-    """Try both working authentication methods"""
-    # Try Method 1 first
-    token = get_access_token_method1(client_id, client_secret)
-    if token:
-        return token
-    
-    # Fallback to Method 2
-    token = get_access_token_method2(client_id, client_secret)
-    return token
-
-def search_patents(access_token, year, max_results=50):
-    """Search for patents by publication year"""
-    search_url = "https://ops.epo.org/3.2/rest-services/published-data/search"
-    
-    # Search query for patents published in the specified year
-    query = f'pd within "{year}"'
-    
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Accept': 'application/json',
-        'User-Agent': 'EPO-Patent-App/1.0'
-    }
-    
-    params = {
-        'q': query,
-        'Range': f'1-{min(max_results, 100)}'  # EPO limits to 100 per request
-    }
-    
-    try:
-        response = requests.get(search_url, headers=headers, params=params, timeout=30)
-        if response.status_code == 200:
-            return response.json()
         else:
-            st.error(f"Search failed with status {response.status_code}: {response.text}")
+            st.error(f"Auth failed: {response.status_code} - {response.text}")
             return None
-    except requests.exceptions.RequestException as e:
-        st.error(f"Search failed: {e}")
+            
+    except Exception as e:
+        st.error(f"Authentication error: {e}")
         return None
 
-def parse_search_results(search_data):
-    """Parse search results and extract patent information"""
+# ===== 3️⃣ Batch Patent Search =====
+def search_patents_batch(token, start_date, end_date, batch_size=100):
+    """Search patents in batches for date range"""
+    url = "https://ops.epo.org/3.2/rest-services/published-data/search"
+    
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/json'
+    }
+    
+    all_patents = []
+    current_start = 1
+    
+    # Create broader search query for date range
+    query = f'pd >= {start_date} AND pd <= {end_date}'
+    
+    while True:
+        params = {
+            'q': query,
+            'Range': f'{current_start}-{current_start + batch_size - 1}'
+        }
+        
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                patents = extract_patent_data(data)
+                
+                if not patents:  # No more results
+                    break
+                    
+                all_patents.extend(patents)
+                st.write(f"📥 Extracted {len(all_patents)} patents so far...")
+                
+                # Check if we got less than requested (end of results)
+                if len(patents) < batch_size:
+                    break
+                    
+                current_start += batch_size
+                time.sleep(0.5)  # Rate limiting
+                
+            elif response.status_code == 404:
+                break  # No more results
+            else:
+                st.warning(f"API returned {response.status_code}: {response.text}")
+                break
+                
+        except Exception as e:
+            st.error(f"Search error: {e}")
+            break
+    
+    return all_patents
+
+# ===== 4️⃣ Simple Data Extraction =====
+def extract_patent_data(api_response):
+    """Extract patent data from API response - simplified parsing"""
     patents = []
     
-    if not search_data or 'ops:world-patent-data' not in search_data:
-        return patents
-    
-    world_data = search_data['ops:world-patent-data']
-    
-    if 'ops:biblio-search' not in world_data:
-        return patents
-    
-    biblio_search = world_data['ops:biblio-search']
-    
-    if 'ops:search-result' not in biblio_search:
-        return patents
-    
-    search_results = biblio_search['ops:search-result']
-    
-    # Handle both single result and multiple results
-    if isinstance(search_results, dict):
-        search_results = [search_results]
-    
-    for result in search_results:
-        try:
-            exchange_doc = result.get('exchange-document', {})
-            biblio_data = exchange_doc.get('bibliographic-data', {})
-            
-            # Get publication reference
-            pub_ref = biblio_data.get('publication-reference', {})
-            doc_id = pub_ref.get('document-id', [{}])
-            if isinstance(doc_id, list):
-                doc_id = doc_id[0]
-            
-            doc_number = doc_id.get('doc-number', {}).get('$', 'N/A')
-            country = doc_id.get('country', {}).get('$', 'N/A')
-            kind = doc_id.get('kind', {}).get('$', 'N/A')
-            date = doc_id.get('date', {}).get('$', 'N/A')
-            
-            # Try to get applicant info
-            applicant = 'N/A'
-            parties = biblio_data.get('parties', {})
-            if 'applicants' in parties:
-                applicants = parties['applicants'].get('applicant', [])
-                if isinstance(applicants, list) and applicants:
-                    applicant_name = applicants[0].get('applicant-name', {})
-                    if isinstance(applicant_name, dict):
-                        name_data = applicant_name.get('name', {})
-                        applicant = name_data.get('$', 'N/A') if isinstance(name_data, dict) else str(name_data)
-                elif isinstance(applicants, dict):
-                    applicant_name = applicants.get('applicant-name', {})
-                    if isinstance(applicant_name, dict):
-                        name_data = applicant_name.get('name', {})
-                        applicant = name_data.get('$', 'N/A') if isinstance(name_data, dict) else str(name_data)
-            
-            # Try to get title
-            title = 'N/A'
-            inv_title = biblio_data.get('invention-title', {})
-            if isinstance(inv_title, list) and inv_title:
-                title = inv_title[0].get('$', 'N/A')
-            elif isinstance(inv_title, dict):
-                title = inv_title.get('$', 'N/A')
-            
-            patents.append({
-                'DocNumber': f"{country}{doc_number}",
-                'Country': country,
-                'Kind': kind,
-                'PubDate': date,
-                'Applicant': applicant,
-                'Title': title
-            })
-            
-        except (KeyError, TypeError, IndexError, AttributeError) as e:
-            continue
+    try:
+        # Navigate through EPO's JSON structure
+        world_data = api_response.get('ops:world-patent-data', {})
+        biblio_search = world_data.get('ops:biblio-search', {})
+        search_result = biblio_search.get('ops:search-result', [])
+        
+        # Handle single result vs multiple results
+        if isinstance(search_result, dict):
+            search_result = [search_result]
+        
+        for result in search_result:
+            try:
+                # Get basic document info
+                doc = result.get('exchange-document', {})
+                biblio = doc.get('bibliographic-data', {})
+                
+                # Publication reference
+                pub_ref = biblio.get('publication-reference', {})
+                doc_id = pub_ref.get('document-id', [{}])
+                
+                if isinstance(doc_id, list):
+                    doc_id = doc_id[0]
+                
+                # Extract basic fields
+                doc_number = safe_extract(doc_id, 'doc-number', '$')
+                country = safe_extract(doc_id, 'country', '$')
+                kind = safe_extract(doc_id, 'kind', '$')
+                pub_date = safe_extract(doc_id, 'date', '$')
+                
+                # Get title
+                title = 'N/A'
+                inv_title = biblio.get('invention-title', {})
+                if isinstance(inv_title, list) and inv_title:
+                    title = safe_extract(inv_title[0], '$')
+                elif isinstance(inv_title, dict):
+                    title = safe_extract(inv_title, '$')
+                
+                # Get applicant
+                applicant = 'N/A'
+                parties = biblio.get('parties', {})
+                applicants = parties.get('applicants', {})
+                
+                if isinstance(applicants, dict):
+                    applicant_list = applicants.get('applicant', [])
+                    if isinstance(applicant_list, list) and applicant_list:
+                        applicant_name = applicant_list[0].get('applicant-name', {})
+                        name = applicant_name.get('name', {})
+                        applicant = safe_extract(name, '$')
+                    elif isinstance(applicant_list, dict):
+                        applicant_name = applicant_list.get('applicant-name', {})
+                        name = applicant_name.get('name', {})
+                        applicant = safe_extract(name, '$')
+                
+                patents.append({
+                    'Document_Number': f"{country}{doc_number}" if country and doc_number else 'N/A',
+                    'Country': country or 'N/A',
+                    'Publication_Date': pub_date or 'N/A',
+                    'Kind_Code': kind or 'N/A',
+                    'Title': title or 'N/A',
+                    'Applicant': applicant or 'N/A'
+                })
+                
+            except Exception as e:
+                continue  # Skip problematic records
+                
+    except Exception as e:
+        st.warning(f"Data extraction error: {e}")
     
     return patents
 
-# ===== 3️⃣ Centered input fields using columns =====
+def safe_extract(data, *keys):
+    """Safely extract nested dictionary values"""
+    try:
+        result = data
+        for key in keys:
+            if isinstance(result, dict):
+                result = result.get(key, 'N/A')
+            else:
+                return 'N/A'
+        return result if result != 'N/A' else 'N/A'
+    except:
+        return 'N/A'
+
+# ===== 5️⃣ User Interface =====
 col1, col2, col3 = st.columns([1,2,1])
+
 with col2:
+    st.markdown("### 🔐 Authentication")
     client_id = st.text_input("Client ID", key="client_id")
     client_secret = st.text_input("Client Secret", type="password", key="client_secret")
-    year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, key="year")
-    max_rows = st.number_input("Max Rows", min_value=1, max_value=100, value=50, key="max_rows")
+    
+    st.markdown("### 📅 Date Range")
+    col_date1, col_date2 = st.columns(2)
+    
+    with col_date1:
+        start_date = st.date_input("Start Date", value=datetime(2024, 1, 1))
+    with col_date2:
+        end_date = st.date_input("End Date", value=datetime(2024, 12, 31))
+    
+    st.markdown("### ⚙️ Settings")
+    max_patents = st.number_input("Maximum Patents", min_value=100, max_value=10000, value=1000, step=100,
+                                 help="Maximum number of patents to extract")
+    
+    batch_size = st.selectbox("Batch Size", options=[25, 50, 100], index=2,
+                             help="Number of patents per API call")
 
-# ===== 4️⃣ Run button =====
+# ===== 6️⃣ Run Button =====
 with col2:
-    run_button = st.button("Run")
+    run_button = st.button("🚀 Extract Patent Data")
 
 if run_button:
     if not client_id or not client_secret:
-        st.error("❌ Please provide both Client ID and Client Secret")
+        st.error("❌ Please enter your EPO API credentials")
     else:
-        st.success("You got it, now sit back and relax while I cook your CSV")
+        # Format dates for EPO API
+        start_str = start_date.strftime("%Y%m%d")
+        end_str = end_date.strftime("%Y%m%d")
         
-        # Get access token
-        with st.spinner("Authenticating with EPO..."):
-            access_token = get_access_token(client_id, client_secret)
+        st.success(f"🔄 Extracting patents from {start_date} to {end_date}")
         
-        if access_token:
-            st.success("✅ Successfully authenticated!")
+        # Step 1: Authentication
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        status_text.text("🔐 Authenticating...")
+        token = get_token(client_id, client_secret)
+        progress_bar.progress(20)
+        
+        if token:
+            st.success("✅ Authentication successful!")
             
-            # Search for patents
-            with st.spinner("Searching for patents..."):
-                search_results = search_patents(access_token, year, max_rows)
+            # Step 2: Extract data
+            status_text.text("📥 Extracting patent data...")
+            progress_bar.progress(40)
             
-            if search_results:
-                # Parse results
-                with st.spinner("Processing patent data..."):
-                    patents = parse_search_results(search_results)
+            patents = search_patents_batch(token, start_str, end_str, batch_size)
+            progress_bar.progress(80)
+            
+            if patents:
+                # Limit results if needed
+                if len(patents) > max_patents:
+                    patents = patents[:max_patents]
+                    st.warning(f"⚠️ Limited results to {max_patents} patents")
                 
-                if patents:
-                    df = pd.DataFrame(patents)
-                    st.success(f"✅ Found {len(df)} real patents from {year}!")
-                    
-                    st.markdown("### Patent Results")
-                    st.dataframe(df)
-                    
-                    # ===== 5️⃣ Option to download CSV =====
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name=f"epo_patents_{year}.csv",
-                        mime='text/csv'
-                    )
-                    
-                    # Quick stats
-                    st.markdown("### Quick Statistics")
-                    col_stat1, col_stat2, col_stat3 = st.columns(3)
-                    with col_stat1:
-                        st.metric("Total Patents", len(df))
-                    with col_stat2:
-                        st.metric("Countries", df['Country'].nunique())
-                    with col_stat3:
-                        st.metric("Unique Applicants", df[df['Applicant'] != 'N/A']['Applicant'].nunique())
-                        
-                else:
-                    st.warning("⚠️ No patents found for the specified year. Try a different year or increase max rows.")
+                # Create DataFrame
+                df = pd.DataFrame(patents)
+                progress_bar.progress(100)
+                status_text.text("✅ Data extraction complete!")
+                
+                # Display results
+                st.success(f"🎉 Successfully extracted {len(df)} patents!")
+                
+                # Show preview
+                st.markdown("### 📊 Data Preview")
+                st.dataframe(df.head(10), use_container_width=True)
+                
+                # Statistics
+                st.markdown("### 📈 Statistics")
+                col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                
+                with col_stat1:
+                    st.metric("Total Patents", len(df))
+                with col_stat2:
+                    st.metric("Countries", df['Country'].nunique())
+                with col_stat3:
+                    st.metric("Date Range", f"{(end_date - start_date).days} days")
+                with col_stat4:
+                    valid_applicants = len(df[df['Applicant'] != 'N/A'])
+                    st.metric("With Applicants", valid_applicants)
+                
+                # Download button
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label=f"📥 Download {len(df)} Patents CSV",
+                    data=csv,
+                    file_name=f"epo_patents_{start_str}_{end_str}.csv",
+                    mime='text/csv'
+                )
+                
             else:
-                st.error("❌ Patent search failed. Please try again.")
+                st.warning("⚠️ No patents found for the specified date range")
+                progress_bar.progress(100)
         else:
-            st.error("❌ Authentication failed. Please check your credentials.")
+            st.error("❌ Authentication failed - check your credentials")
+            progress_bar.progress(0)
 
-# ===== 6️⃣ Footer info =====
+# ===== 7️⃣ Help Section =====
 st.markdown("---")
-st.info("💡 **Tip:** Get your EPO API credentials from https://developers.epo.org/")
+with st.expander("ℹ️ How to use this tool"):
+    st.markdown("""
+    ### 📋 Setup Instructions:
+    1. **Get EPO API credentials** from https://developers.epo.org/
+    2. **Enter your Client ID and Secret** above
+    3. **Select date range** for patent search
+    4. **Set maximum patents** to extract (recommended: 1000-5000)
+    5. **Click Extract** and wait for results
+    
+    ### 🚀 Features:
+    - **Date Range Search**: Extract patents from any date period
+    - **Batch Processing**: Efficiently handles large datasets
+    - **Rate Limiting**: Respects EPO API limits
+    - **Progress Tracking**: Shows real-time extraction progress
+    - **CSV Export**: Download results for further analysis
+    
+    ### ⚡ Tips for Large Extractions:
+    - Start with smaller date ranges (1-3 months)
+    - Use batch size of 100 for faster processing
+    - The tool automatically handles pagination
+    - EPO has daily limits, so plan accordingly
+    """)
