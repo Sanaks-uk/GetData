@@ -1,249 +1,214 @@
 import streamlit as st
 import pandas as pd
 import requests
-from requests.auth import HTTPBasicAuth
 import time
-import math
+import base64
 import json
-from datetime import datetime
+from urllib.parse import quote
 
-# Try to import lxml, fall back to xml.etree if not available
-try:
-    from lxml import etree
-    XML_PARSER = "lxml"
-except ImportError:
-    import xml.etree.ElementTree as etree
-    XML_PARSER = "builtin"
-    st.warning("⚠️ lxml not found, using built-in XML parser. Consider adding lxml to requirements.txt for better performance.")
-
-# ===== 1️⃣ Page config and CSS styling =====
-st.set_page_config(page_title="EPO Patent Data", layout="centered")
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #FFE3EB;
+# ===== Alternative Method 1: Different Authentication Approach =====
+def get_access_token_v1(client_id, client_secret):
+    """EPO OAuth2 - Method 1"""
+    token_url = "https://ops.epo.org/3.2/auth/accesstoken"
+    
+    # Method 1: Manual base64 encoding
+    credentials = base64.b64encode(f"{client_id}:{client_secret}".encode('utf-8')).decode('utf-8')
+    
+    headers = {
+        'Authorization': f'Basic {credentials}',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'EPO-Patent-App/1.0'
     }
-    div.stButton > button:first-child {
-        background-color: #FF69B4;
-        color: white;
-        height: 3em;
-        width: 150px;
-        font-size: 16px;
-        border-radius: 10px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+    
+    data = 'grant_type=client_credentials'
+    
+    try:
+        response = requests.post(token_url, headers=headers, data=data, timeout=30)
+        st.write(f"Status: {response.status_code}, Response: {response.text}")
+        
+        if response.status_code == 200:
+            return response.json().get('access_token')
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Auth Method 1 failed: {e}")
+        return None
 
-st.title("📄 EPO Patent & Register Data")
-st.markdown("Fill in your credentials and parameters below:")
-
-# ===== 2️⃣ Helper Functions for EPO API =====
-def get_access_token(client_id, client_secret):
-    """Get OAuth2 access token from EPO"""
+# ===== Alternative Method 2: Using requests.auth =====
+def get_access_token_v2(client_id, client_secret):
+    """EPO OAuth2 - Method 2"""
+    from requests.auth import HTTPBasicAuth
+    
     token_url = "https://ops.epo.org/3.2/auth/accesstoken"
     
     headers = {
-        'Authorization': f'Basic {requests.auth._basic_auth_str(client_id, client_secret)}',
-        'Content-Type': 'application/x-www-form-urlencoded'
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'EPO-Patent-App/1.0'
     }
     
     data = {'grant_type': 'client_credentials'}
     
     try:
-        response = requests.post(token_url, headers=headers, data=data)
-        response.raise_for_status()
-        return response.json().get('access_token')
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to get access token: {e}")
+        response = requests.post(
+            token_url, 
+            headers=headers, 
+            data=data,
+            auth=HTTPBasicAuth(client_id, client_secret),
+            timeout=30
+        )
+        st.write(f"Status: {response.status_code}, Response: {response.text}")
+        
+        if response.status_code == 200:
+            return response.json().get('access_token')
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Auth Method 2 failed: {e}")
         return None
 
-def search_patents(access_token, year, max_results=50):
-    """Search for patents by publication year"""
+# ===== Alternative Method 3: No-Auth Search (Limited) =====
+def search_patents_no_auth(year, max_results=25):
+    """Search patents without authentication (limited functionality)"""
     search_url = "https://ops.epo.org/3.2/rest-services/published-data/search"
     
-    # Search query for patents published in the specified year
+    # Simple query for patents published in year
     query = f'pd within "{year}"'
     
     headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': 'EPO-Patent-App/1.0'
     }
     
     params = {
         'q': query,
-        'Range': f'1-{min(max_results, 100)}'  # EPO limits to 100 per request
+        'Range': f'1-{min(max_results, 25)}'  # No-auth limit is usually lower
     }
     
     try:
-        response = requests.get(search_url, headers=headers, params=params)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"Search failed: {e}")
+        response = requests.get(search_url, headers=headers, params=params, timeout=30)
+        st.write(f"No-auth search status: {response.status_code}")
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.write(f"No-auth response: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"No-auth search failed: {e}")
         return None
 
-def get_patent_details(access_token, doc_number):
-    """Get detailed information for a specific patent"""
-    detail_url = f"https://ops.epo.org/3.2/rest-services/published-data/publication/epodoc/{doc_number}/biblio"
+# ===== Alternative Method 4: Using REST API directly =====
+def search_patents_rest(doc_number):
+    """Get specific patent by document number (no auth needed for some endpoints)"""
+    if not doc_number.startswith(('EP', 'WO', 'US')):
+        doc_number = f"EP{doc_number}"
+    
+    detail_url = f"https://ops.epo.org/3.2/rest-services/published-data/publication/epodoc/{doc_number}"
     
     headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': 'EPO-Patent-App/1.0'
     }
     
     try:
-        response = requests.get(detail_url, headers=headers)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
+        response = requests.get(detail_url, headers=headers, timeout=30)
+        st.write(f"REST API status for {doc_number}: {response.status_code}")
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"REST API failed: {e}")
         return None
 
-def parse_search_results(search_data):
-    """Parse search results and extract patent information"""
-    patents = []
-    
-    if not search_data or 'ops:world-patent-data' not in search_data:
-        return patents
-    
-    world_data = search_data['ops:world-patent-data']
-    
-    if 'ops:biblio-search' not in world_data:
-        return patents
-    
-    biblio_search = world_data['ops:biblio-search']
-    
-    if 'ops:search-result' not in biblio_search:
-        return patents
-    
-    search_results = biblio_search['ops:search-result']
-    
-    # Handle both single result and multiple results
-    if isinstance(search_results, dict):
-        search_results = [search_results]
-    
-    for result in search_results:
-        try:
-            pub_ref = result['exchange-document']['bibliographic-data']['publication-reference']['document-id'][0]
-            
-            doc_number = pub_ref.get('doc-number', {}).get('$', 'N/A')
-            country = pub_ref.get('country', {}).get('$', 'N/A')
-            kind = pub_ref.get('kind', {}).get('$', 'N/A')
-            date = pub_ref.get('date', {}).get('$', 'N/A')
-            
-            # Try to get applicant info
-            applicant = 'N/A'
-            if 'bibliographic-data' in result['exchange-document']:
-                biblio = result['exchange-document']['bibliographic-data']
-                if 'parties' in biblio and 'applicants' in biblio['parties']:
-                    applicants = biblio['parties']['applicants']['applicant']
-                    if isinstance(applicants, list):
-                        applicant = applicants[0].get('applicant-name', {}).get('name', {}).get('$', 'N/A')
-                    else:
-                        applicant = applicants.get('applicant-name', {}).get('name', {}).get('$', 'N/A')
-            
-            # Try to get title
-            title = 'N/A'
-            if 'bibliographic-data' in result['exchange-document']:
-                biblio = result['exchange-document']['bibliographic-data']
-                if 'invention-title' in biblio:
-                    inv_title = biblio['invention-title']
-                    if isinstance(inv_title, list):
-                        title = inv_title[0].get('$', 'N/A')
-                    else:
-                        title = inv_title.get('$', 'N/A')
-            
-            patents.append({
-                'DocNumber': f"{country}{doc_number}",
-                'Country': country,
-                'Kind': kind,
-                'PubDate': date,
-                'Applicant': applicant,
-                'Title': title
-            })
-            
-        except (KeyError, TypeError, IndexError) as e:
-            continue
-    
-    return patents
+# ===== UI for Testing Different Methods =====
+st.title("🔧 EPO API Troubleshooting")
+st.markdown("Let's try different authentication methods:")
 
-# ===== 3️⃣ User Interface =====
-col1, col2, col3 = st.columns([1,2,1])
-with col2:
-    client_id = st.text_input("Client ID", key="client_id", help="Your EPO API client ID")
-    client_secret = st.text_input("Client Secret", type="password", key="client_secret", help="Your EPO API client secret")
-    year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, key="year")
-    max_rows = st.number_input("Max Rows", min_value=1, max_value=100, value=25, key="max_rows", 
-                              help="Maximum number of patents to retrieve (EPO limit: 100)")
+# Test credentials
+test_client_id = st.text_input("Client ID")
+test_client_secret = st.text_input("Client Secret", type="password")
+test_year = st.number_input("Year", value=2024)
 
-# ===== 4️⃣ Run button and main logic =====
-with col2:
-    run_button = st.button("🚀 Get Real EPO Data")
+col1, col2, col3, col4 = st.columns(4)
 
-if run_button:
-    if not client_id or not client_secret:
-        st.error("❌ Please provide both Client ID and Client Secret")
-    else:
-        st.success("🔄 Fetching real EPO patent data...")
-        
-        with st.spinner("Getting access token..."):
-            access_token = get_access_token(client_id, client_secret)
-        
-        if access_token:
-            st.success("✅ Successfully authenticated with EPO API")
-            
-            with st.spinner("Searching for patents..."):
-                search_results = search_patents(access_token, year, max_rows)
-            
-            if search_results:
-                with st.spinner("Parsing patent data..."):
-                    patents = parse_search_results(search_results)
-                
-                if patents:
-                    df = pd.DataFrame(patents)
-                    st.success(f"✅ Successfully retrieved {len(df)} real patents from {year}")
-                    
-                    # Display results
-                    st.markdown("### 📊 Patent Search Results")
-                    st.dataframe(df, use_container_width=True)
-                    
-                    # Download button
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download Real Patent Data CSV",
-                        data=csv,
-                        file_name=f"epo_real_patents_{year}.csv",
-                        mime='text/csv'
-                    )
-                    
-                    # Show some statistics
-                    st.markdown("### 📈 Quick Stats")
-                    col_stat1, col_stat2, col_stat3 = st.columns(3)
-                    with col_stat1:
-                        st.metric("Total Patents", len(df))
-                    with col_stat2:
-                        st.metric("Unique Countries", df['Country'].nunique())
-                    with col_stat3:
-                        st.metric("Unique Applicants", df['Applicant'].nunique())
-                        
-                else:
-                    st.warning("⚠️ No patents found for the specified criteria")
+with col1:
+    if st.button("Test Method 1"):
+        if test_client_id and test_client_secret:
+            st.write("🧪 Testing Manual Base64...")
+            token = get_access_token_v1(test_client_id, test_client_secret)
+            if token:
+                st.success(f"✅ Method 1 Success! Token: {token[:20]}...")
             else:
-                st.error("❌ Failed to search patents. Check your credentials and try again.")
-        else:
-            st.error("❌ Authentication failed. Please check your Client ID and Secret.")
+                st.error("❌ Method 1 Failed")
 
-# ===== 5️⃣ Information section =====
+with col2:
+    if st.button("Test Method 2"):
+        if test_client_id and test_client_secret:
+            st.write("🧪 Testing HTTPBasicAuth...")
+            token = get_access_token_v2(test_client_id, test_client_secret)
+            if token:
+                st.success(f"✅ Method 2 Success! Token: {token[:20]}...")
+            else:
+                st.error("❌ Method 2 Failed")
+
+with col3:
+    if st.button("Test No-Auth"):
+        st.write("🧪 Testing No-Auth Search...")
+        results = search_patents_no_auth(test_year, 10)
+        if results:
+            st.success("✅ No-Auth Search Works!")
+            st.json(results)
+        else:
+            st.error("❌ No-Auth Failed")
+
+with col4:
+    test_doc = st.text_input("Doc Number", placeholder="EP1234567")
+    if st.button("Test REST") and test_doc:
+        st.write(f"🧪 Testing REST API for {test_doc}...")
+        results = search_patents_rest(test_doc)
+        if results:
+            st.success("✅ REST API Works!")
+            st.json(results)
+        else:
+            st.error("❌ REST API Failed")
+
+# ===== Troubleshooting Guide =====
 st.markdown("---")
-st.markdown("### ℹ️ How to get EPO API credentials:")
+st.markdown("### 🔍 Troubleshooting EPO API Issues:")
+
 st.markdown("""
-1. Register at [EPO Open Patent Services](https://developers.epo.org/)
-2. Create an application to get your Client ID and Secret
-3. The EPO API has rate limits, so be patient with large requests
-4. This app searches for patents published in the specified year
+**Common causes of 500 errors:**
+
+1. **Invalid Credentials Format**
+   - Make sure your Client ID doesn't have spaces
+   - Check for special characters in Client Secret
+   - Verify credentials are from EPO Developer Portal
+
+2. **EPO Server Issues**
+   - Try again in a few minutes
+   - EPO API sometimes has maintenance
+
+3. **Request Format Issues**
+   - Different EPO endpoints expect different formats
+   - Some require XML, others JSON
+
+4. **Rate Limiting**
+   - EPO has strict rate limits
+   - Wait between requests
+
+**Alternative Solutions:**
+- Use the No-Auth method for basic searches (limited results)
+- Try the REST API for specific document lookups
+- Contact EPO support if credentials are definitely correct
 """)
 
-st.markdown("### 🔧 Technical Notes:")
-st.info(f"Using {XML_PARSER} XML parser | EPO API Version: 3.2")
+st.markdown("### 📝 EPO Credential Checklist:")
+st.markdown("""
+- [ ] Registered at https://developers.epo.org/
+- [ ] Created an application in your account
+- [ ] Got Consumer Key (Client ID) and Consumer Secret
+- [ ] Credentials are active (not expired)
+- [ ] No special characters causing encoding issues
+""")
