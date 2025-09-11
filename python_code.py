@@ -434,7 +434,7 @@ with col2:
         end_date = st.date_input("End Date", value=datetime(2024, 12, 31))
     
     st.markdown("### ⚙️ Settings")
-    max_patents = st.number_input("Maximum Patents", min_value=100, max_value=10000, value=1000, step=100,
+    max_patents = st.number_input("Maximum Patents", min_value=1, max_value=10000, value=1000, step=100,
                                  help="Maximum number of patents to extract")
     
     batch_size = st.selectbox("Batch Size", options=[2, 5, 10], index=2,
