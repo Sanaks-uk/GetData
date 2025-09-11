@@ -437,7 +437,7 @@ with col2:
     max_patents = st.number_input("Maximum Patents", min_value=100, max_value=10000, value=1000, step=100,
                                  help="Maximum number of patents to extract")
     
-    batch_size = st.selectbox("Batch Size", options=[25, 50, 100], index=2,
+    batch_size = st.selectbox("Batch Size", options=[2, 5, 10], index=2,
                              help="Number of patents per API call")
     
     include_register = st.checkbox("Include Register Data", value=False,
