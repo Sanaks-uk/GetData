@@ -266,7 +266,7 @@ def extract_cpc_data(doc_num, headers):
     return "", []
 
 # ===== 5️⃣ Main Patent Search Function =====
-def search_patents_comprehensive(token, start_date, end_date, max_patents=1000, batch_size=100, include_register=False):
+def search_patents_comprehensive(token, start_date, end_date, max_patents=1000, batch_size=5, include_register=False):
     """Comprehensive patent search with biblio and optional register data"""
     
     # Setup
